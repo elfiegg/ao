@@ -163,7 +163,20 @@ class TrainingWeightWrapperBaseTensor(TorchAOBaseTensor):
         mp_policy: MixedPrecisionPolicy,
     ):
         # cast to mixed precision dtype prior to all-gather
-        all_gather_inputs = (self._data.to(mp_policy.param_dtype),)
+        casted = self._data.to(mp_policy.param_dtype)
+        # _llmb_pad_uneven_fsdp_shard: pad dim 0 with zeros when FSDP shards unevenly
+        # (e.g. out_features not divisible by world_size). Without this,
+        # ranks past the data boundary return a [0, ...] shard and FSDP
+        # asserts that all-gather inputs must match padded_sharded_size.
+        world_size = mesh.size()
+        if world_size > 0 and len(outer_size) >= 1:
+            padded_dim0 = (outer_size[0] + world_size - 1) // world_size
+            cur_dim0 = casted.size(0)
+            if cur_dim0 < padded_dim0:
+                pad_shape = (padded_dim0 - cur_dim0,) + tuple(casted.shape[1:])
+                pad = torch.zeros(pad_shape, dtype=casted.dtype, device=casted.device)
+                casted = torch.cat([casted, pad], dim=0) if cur_dim0 > 0 else pad
+        all_gather_inputs = (casted,)
         all_gather_metadata = ()
         return all_gather_inputs, all_gather_metadata
 
